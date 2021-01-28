@@ -16,11 +16,17 @@ const bot = mineflayer.createBot({
 
 bot.loadPlugin(pathfinder);
 
+function deg2rad(degrees) {
+  var pi = Math.PI;
+  return degrees * (pi / 180);
+}
+
 const positions = {
   cobbleStoneMining: v(7215, 72, 2399),
   cobbleStone: v(7216, 73, 2399),
   goodItemsChest: v(7212, 72, 2400), // bot will put good items (everything except cobblestones) and take pickaxes from this location
   cobbleStoneMarket: v(7199, 72, 2424), // I use this bot to fill a cobblestone selling market chests too so
+  cobbleStoneDirection: { pitch: deg2rad(-90), yaw: deg2rad(0) },
 };
 
 /*
@@ -33,12 +39,42 @@ const rl = readline.createInterface({
   input: process.stdin,
 });
 
+let shouldStop = false;
+
 rl.on("line", (input) => {
   if (input.startsWith("-")) {
     input = input.substr(1);
     switch (input) {
+      case "stop": {
+        shouldStop = true;
+        break;
+      }
       case "items": {
         log(bot.inventory.items());
+        break;
+      }
+      case "chests": {
+        for (let block of Object.keys(bot._blockEntities)) {
+          block = bot._blockEntities[block];
+          if (block.id === "minecraft:chest") {
+            log(block);
+          }
+        }
+
+        break;
+      }
+      case "closechests": {
+        log(
+          bot
+            .findBlocks({
+              matching: ["chest", "trapped_chest"].map(
+                (name) => mcData.blocksByName[name].id
+              ),
+              maxDistance: 4,
+              count: 4,
+            })
+            .map((pos) => bot.blockAt(pos))
+        );
         break;
       }
       case "entities": {
@@ -100,6 +136,10 @@ function goToCobblestoneMarket() {
 }
 
 async function depositGoodItems() {
+  if (shouldStop) {
+    log(chalk.red("STOPPING THE BOT"));
+    return;
+  }
   await sleep(1000);
 
   log(chalk.blue("trying to deposit good items"));
@@ -144,11 +184,15 @@ async function depositGoodItems() {
 }
 
 async function depositCobblestoneToMarket() {
+  if (shouldStop) {
+    log(chalk.red("STOPPING THE BOT"));
+    return;
+  }
   await sleep(1000);
 
   log(chalk.blue("trying to deposit cobblestone items"));
 
-  const items = bot.inventory.items();
+  let items = bot.inventory.items();
 
   if (items.length === 0) {
     log(chalk.redBright("bot already has no items on him"));
@@ -163,6 +207,8 @@ async function depositCobblestoneToMarket() {
     count: 4,
   });
 
+  chests = chests.map((position) => bot.blockAt(position));
+
   if (chests.length == 0) {
     log(chalk.redBright("market chests couldn't be found"));
     goToCobblestoneMarket();
@@ -176,26 +222,32 @@ async function depositCobblestoneToMarket() {
 
     let chest = bot.openChest(chestToOpen);
 
-    chest.once("open", async () => {
-      log(chalk.green("chest is opened for cobblestone items"));
+    await new Promise((resolve, reject) => {
+      chest.once("open", async () => {
+        log(chalk.green("chest is opened for cobblestone items"));
 
-      if (chest.window.emptySlotCount() === 0) {
-        chest.close();
-        log(chalk.red("one of the market chests is already full so closed it"));
-        continue;
-      }
-
-      for (let i = 0; i < items.length; i++) {
-        let item = items[i];
-        if (item.name === "cobblestone") {
-          log(chalk.grey("depositing x" + item.count + " of " + item.name));
-          await chest.deposit(item.type, null, item.count);
+        if (chest.window.emptySlotCount() === 0) {
+          chest.close();
+          log(
+            chalk.red("one of the market chests is already full so closed it")
+          );
+          resolve();
         }
-      }
-      chest.close();
-      log(chalk.green("chest is closed"));
-      resolve();
+
+        for (let i = 0; i < items.length; i++) {
+          let item = items[i];
+          if (item.name === "cobblestone") {
+            log(chalk.grey("depositing x" + item.count + " of " + item.name));
+            await chest.deposit(item.type, null, item.count);
+          }
+        }
+        chest.close();
+        log(chalk.green("chest is closed"));
+        resolve();
+      });
     });
+
+    await sleep(500);
   }
 }
 
@@ -269,6 +321,11 @@ async function equipPickaxe() {
 }
 
 async function dig() {
+  if (shouldStop) {
+    log(chalk.red("STOPPING THE BOT"));
+    return;
+  }
+
   await sleep(250);
 
   log(chalk.blue("trying to dig"));
@@ -279,7 +336,10 @@ async function dig() {
   }
 
   if (bot.heldItem && bot.heldItem.name.includes("pickaxe")) {
-    await bot.lookAt(v(7220, 73, 2399), true);
+    await bot.look(
+      positions.cobbleStoneDirection.yaw,
+      positions.cobbleStoneDirection.pitch
+    );
     if (bot.targetDigBlock) {
       log(chalk.redBright("already digging!"));
     } else {
@@ -292,7 +352,12 @@ async function dig() {
           dig();
         });
       } else {
-        log("cannot dig");
+        log(chalk.red("cannot dig, trying again"));
+        await bot.look(
+          positions.cobbleStoneDirection.yaw,
+          positions.cobbleStoneDirection.pitch
+        );
+        dig();
       }
     }
   } else {
@@ -325,7 +390,12 @@ bot.once("spawn", () => {
   }, 2000);
 
   bot.on("goal_reached", async () => {
-    console.log("I reached my " + botTarget + " target!");
+    if (shouldStop) {
+      log(chalk.red("STOPPING THE BOT"));
+      return;
+    }
+
+    log(chalk.green("I reached my " + botTarget + " target!"));
 
     switch (botTarget) {
       case "cobble": {
@@ -351,7 +421,7 @@ bot.once("spawn", () => {
       }
       case "market": {
         await depositCobblestoneToMarket();
-        await depositGoodItems();
+        goToChest();
         return;
       }
     }
@@ -368,10 +438,8 @@ bot.once("spawn", () => {
     );
   });
 
-  const blocks = ["stone", "ore"];
-
   bot.on("blockUpdate", function (oldBlock, newBlock) {
-    if (!bot.targetDigBlock) {
+    if (!bot.targetDigBlock && target === "cobble") {
       if (newBlock.name.includes("stone") || newBlock.name.includes("ore")) {
         if (newBlock.position.distanceTo(positions.cobbleStone) < 5) {
           if (bot.blockAtCursor() != bot.targetDigBlock) {
@@ -396,11 +464,10 @@ bot.once("spawn", () => {
       if (message.toLowerCase().includes("başarıyla giriş yaptın")) {
         setTimeout(() => {
           if (
-            bot.entity.position.distanceTo(positions.cobbleStoneMining) > 25
+            bot.entity.position.distanceTo(positions.cobbleStoneMining) > 100
           ) {
             bot.chat("/is go");
           } else {
-            goToCobblestoneMarket();
           }
         }, 2000);
       }
